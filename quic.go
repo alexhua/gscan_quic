@@ -12,7 +12,7 @@ import (
 	"time"
 
 	quic "github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/h2quic"
+	"github.com/lucas-clemente/quic-go/http3"
 )
 
 var errNoSuchBucket = []byte("<?xml version='1.0' encoding='UTF-8'?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist.</Message></Error>")
@@ -20,7 +20,7 @@ var errNoSuchBucket = []byte("<?xml version='1.0' encoding='UTF-8'?><Error><Code
 func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 	start := time.Now()
 
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
 		return false
 	}
@@ -40,19 +40,21 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 	}
 
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: false,
 		ServerName:         serverName,
+		NextProtos:         []string{"h3-29", "h3-27"},
 	}
 
 	udpAddr := &net.UDPAddr{IP: net.ParseIP(ip), Port: 443}
-	addr := net.JoinHostPort(serverName, "443")
-	quicSessn, err := quic.Dial(udpConn, udpAddr, addr, tlsCfg, quicCfg)
+	host := net.JoinHostPort(serverName, "443")
+	quicSessn, err := quic.DialEarly(udpConn, udpAddr, host, tlsCfg, quicCfg)
 	if err != nil {
 		return false
 	}
-	defer quicSessn.Close(nil)
+	defer quicSessn.CloseWithError(quic.ErrorCode(256), "")
 
 	// lv1 只会验证证书是否存在
+	// quicSessn.HandshakeComplete()
 	cs := quicSessn.ConnectionState()
 	if !cs.HandshakeComplete {
 		return false
@@ -64,7 +66,7 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 
 	// lv2 验证证书是否正确
 	if config.Level > 1 {
-		pkp := pcs[1].RawSubjectPublicKeyInfo
+		pkp := pcs[1].SubjectKeyId
 		if !bytes.Equal(g2pkp, pkp) && !bytes.Equal(g3pkp, pkp) { // && !bytes.Equal(g3ecc, pkp[:]) {
 			return false
 		}
@@ -72,10 +74,10 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 
 	// lv3 使用 http 访问来验证
 	if config.Level > 2 {
-		tr := &h2quic.RoundTripper{DisableCompression: true}
+		tr := &http3.RoundTripper{DisableCompression: false, TLSClientConfig: tlsCfg, QuicConfig: quicCfg}
 		defer tr.Close()
 
-		tr.Dial = func(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.Session, error) {
+		tr.Dial = func(network, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
 			return quicSessn, err
 		}
 		// 设置超时
@@ -90,7 +92,7 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		req.Close = true
 		resp, _ := hclient.Do(req)
-		if resp == nil || (resp.StatusCode < 200 || resp.StatusCode >= 400) || !strings.Contains(resp.Header.Get("Alt-Svc"), `quic=":443"`) {
+		if resp == nil || (resp.StatusCode < 200 || resp.StatusCode >= 400) || !strings.Contains(resp.Header.Get("Alt-Svc"), `h3-29=":443"`) {
 			return false
 		}
 		if resp.Body != nil {
