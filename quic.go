@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"io"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -49,6 +50,7 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 	host := net.JoinHostPort(serverName, "443")
 	quicSessn, err := quic.DialEarly(udpConn, udpAddr, host, tlsCfg, quicCfg)
 	if err != nil {
+		log.Printf("IP=%s, %s\n", ip, err.Error())
 		return false
 	}
 	defer quicSessn.CloseWithError(quic.ErrorCode(256), "")
@@ -92,17 +94,27 @@ func testQuic(ip string, config *ScanConfig, record *ScanRecord) bool {
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		req.Close = true
 		resp, _ := hclient.Do(req)
+
 		if resp == nil || (resp.StatusCode < 200 || resp.StatusCode >= 400) || !strings.Contains(resp.Header.Get("Alt-Svc"), `h3-29=":443"`) {
+			if err != nil {
+				log.Printf("IP=%s, %s\n", ip, err.Error())
+			} else {
+				log.Printf("IP=%s, Invalid Response\n", ip)
+			}
 			return false
 		}
 		if resp.Body != nil {
 			defer resp.Body.Close()
 			// lv4 验证是否是 NoSuchBucket 错误
-			if config.Level > 3 && resp.Header.Get("Content-Type") == "application/xml; charset=UTF-8" { // 也许条件改为 || 更好
+			if config.Level > 3 {
+				bandTestStart := time.Now()
 				body, err := ioutil.ReadAll(resp.Body)
+				testDuration := time.Since(bandTestStart)
 				if err != nil || bytes.Equal(body, errNoSuchBucket) {
 					return false
 				}
+
+				log.Printf("Test speed = %.2fKB/s\n", float64(len(body))/testDuration.Seconds()/1024)
 			} else {
 				io.Copy(ioutil.Discard, resp.Body)
 			}
